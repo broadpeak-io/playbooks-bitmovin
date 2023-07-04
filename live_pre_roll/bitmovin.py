@@ -51,11 +51,6 @@ class BitmovinController:
 
         encoding = self._create_encoding(name=name, description="")
 
-        # Manifest
-        hls_manifest = self._generate_hls_manifest(
-            output=self.output, output_path=output_sub_path
-        )
-
         # ABR Ladder
         video_configurations = [
             self._create_h264_video_configuration(
@@ -63,7 +58,7 @@ class BitmovinController:
                 bitrate=r.bitrate,
                 profile=bm.ProfileH264(r.profile.upper()),
                 level=bm.LevelH264(r.level),
-                rate=cfg.FRAME_RATE
+                rate=cfg.FRAME_RATE,
             )
             for r in cfg.VIDEO_LADDER
         ]
@@ -73,7 +68,7 @@ class BitmovinController:
             for r in cfg.AUDIO_LADDER
         ]
 
-        # create video streams, muxings, dash representations and hls variant playlists
+        # create video streams and muxings
         for i, video_config in enumerate(video_configurations):
             h264_video_stream = self._create_stream(
                 encoding=encoding,
@@ -83,20 +78,11 @@ class BitmovinController:
             )
 
             relative_path_ts = f"video/{video_config.bitrate}/ts"
-            ts_muxing = self._create_ts_muxing(
+            self._create_ts_muxing(
                 encoding=encoding,
                 output=self.output,
                 output_path=f"{output_sub_path}/{relative_path_ts}",
                 stream=h264_video_stream,
-            )
-
-            self._add_hls_variant(
-                encoding=encoding,
-                hls_manifest=hls_manifest,
-                stream=h264_video_stream,
-                ts_muxing=ts_muxing,
-                relative_path=relative_path_ts,
-                filename_suffix=f"{video_config.height}p_{video_config.bitrate}",
             )
 
         # create audio streams and muxings
@@ -109,21 +95,16 @@ class BitmovinController:
             )
 
             relative_path_ts = f"audio/{audio_config.bitrate}/ts"
-            ts_muxing = self._create_ts_muxing(
+            self._create_ts_muxing(
                 encoding=encoding,
                 output=self.output,
                 output_path=f"{output_sub_path}/{relative_path_ts}",
                 stream=audio_stream,
             )
 
-            self._add_hls_media(
-                encoding=encoding,
-                hls_manifest=hls_manifest,
-                stream=audio_stream,
-                ts_muxing=ts_muxing,
-                relative_path=relative_path_ts,
-                filename_suffix=f"{audio_config.bitrate}",
-            )
+        hls_manifest = self._generate_hls_manifest_default(
+            encoding=encoding, output=self.output, output_path=output_sub_path
+        )
 
         # Setting the auto_shutdown_configuration is optional;
         # if omitted the live encoding will not shut down automatically.
@@ -352,66 +333,18 @@ class BitmovinController:
             aac_audio_configuration=config
         )
 
-    def _generate_hls_manifest(
-        self, output: bm.Output, output_path: str
-    ) -> bm.HlsManifest:
-        hls_manifest = bm.HlsManifest(
+    def _generate_hls_manifest_default(
+        self, encoding: bm.Encoding, output: bm.Output, output_path: str
+    ) -> bm.HlsManifestDefault:
+        hls_manifest = bm.HlsManifestDefault(
+            encoding_id=encoding.id,
             outputs=[self._build_encoding_output(output, output_path)],
             name="HLS/ts Manifest",
-            hls_master_playlist_version=bm.HlsVersion.HLS_V6,
-            hls_media_playlist_version=bm.HlsVersion.HLS_V6,
             manifest_name="stream.m3u8",
+            version=bm.HlsManifestDefaultVersion.V1,
         )
 
-        return self.hls_api.create(hls_manifest=hls_manifest)
-
-    def _add_hls_variant(
-        self,
-        encoding: bm.Encoding,
-        hls_manifest: bm.HlsManifest,
-        stream: bm.Stream,
-        ts_muxing: bm.TsMuxing,
-        relative_path: str,
-        filename_suffix: str,
-    ) -> bm.StreamInfo:
-        stream_info = bm.StreamInfo(
-            audio="AUDIO",
-            segment_path=relative_path,
-            uri=f"video_{filename_suffix}.m3u8",
-            encoding_id=encoding.id,
-            stream_id=stream.id,
-            muxing_id=ts_muxing.id,
-            force_frame_rate_attribute=True,
-            force_video_range_attribute=True,
-        )
-
-        return self.hls_api.streams.create(
-            manifest_id=hls_manifest.id, stream_info=stream_info
-        )
-
-    def _add_hls_media(
-        self,
-        encoding: bm.Encoding,
-        hls_manifest: bm.HlsManifest,
-        stream: bm.Stream,
-        ts_muxing: bm.TsMuxing,
-        relative_path: str,
-        filename_suffix: str,
-    ) -> bm.AudioMediaInfo:
-        media_info = bm.AudioMediaInfo(
-            name=filename_suffix,
-            group_id="AUDIO",
-            language="en",
-            segment_path=relative_path,
-            uri=f"audio_{filename_suffix}.m3u8",
-            encoding_id=encoding.id,
-            stream_id=stream.id,
-            muxing_id=ts_muxing.id,
-        )
-
-        return self.hls_api.media.audio.create(
-            manifest_id=hls_manifest.id, audio_media_info=media_info
-        )
+        return self.hls_api.default.create(hls_manifest_default=hls_manifest)
 
     def _build_encoding_output(
         self, output: bm.Output, output_path: str
