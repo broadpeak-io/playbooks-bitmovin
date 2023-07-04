@@ -30,7 +30,6 @@ class BitmovinController:
         )
 
         self.encoding_api = self.bitmovin_api.encoding
-        self.dash_api = self.bitmovin_api.encoding.manifests.dash
         self.hls_api = self.bitmovin_api.encoding.manifests.hls
 
         if hasattr(cfg, "S3_OUTPUT_ID"):
@@ -52,16 +51,7 @@ class BitmovinController:
 
         encoding = self._create_encoding(name=name, description="")
 
-        # Manifests
-        (
-            dash_manifest,
-            period,
-            video_adaptation_set,
-            audio_adaptation_set,
-        ) = self._generate_dash_manifest(
-            output=self.output, output_path=output_sub_path
-        )
-
+        # Manifest
         hls_manifest = self._generate_hls_manifest(
             output=self.output, output_path=output_sub_path
         )
@@ -100,23 +90,6 @@ class BitmovinController:
                 stream=h264_video_stream,
             )
 
-            relative_path_fmp4 = f"video/{video_config.bitrate}/fmp4"
-            fmp4_muxing = self._create_fmp4_muxing(
-                encoding=encoding,
-                output=self.output,
-                output_path=f"{output_sub_path}/{relative_path_fmp4}",
-                stream=h264_video_stream,
-            )
-
-            self._add_dash_representation(
-                encoding=encoding,
-                dash_manifest=dash_manifest,
-                period=period,
-                adaptation_set=video_adaptation_set,
-                fmp4_muxing=fmp4_muxing,
-                relative_path=relative_path_fmp4,
-            )
-
             self._add_hls_variant(
                 encoding=encoding,
                 hls_manifest=hls_manifest,
@@ -141,23 +114,6 @@ class BitmovinController:
                 output=self.output,
                 output_path=f"{output_sub_path}/{relative_path_ts}",
                 stream=audio_stream,
-            )
-
-            relative_path_fmp4 = f"audio/{audio_config.bitrate}/fmp4"
-            fmp4_muxing = self._create_fmp4_muxing(
-                encoding=encoding,
-                output=self.output,
-                output_path=f"{output_sub_path}/{relative_path_fmp4}",
-                stream=audio_stream,
-            )
-
-            self._add_dash_representation(
-                encoding=encoding,
-                dash_manifest=dash_manifest,
-                period=period,
-                adaptation_set=audio_adaptation_set,
-                fmp4_muxing=fmp4_muxing,
-                relative_path=relative_path_fmp4,
             )
 
             self._add_hls_media(
@@ -189,22 +145,15 @@ class BitmovinController:
                 insert_program_date_time=True,
             )
         ]
-        start_live_encoding_request.dash_manifests = [
-            bm.LiveDashManifest(
-                manifest_id=dash_manifest.id,
-                timeshift=timeshift_window,
-                live_edge_offset=live_edge_offset,
-            )
-        ]
 
         self._start_live_encoding_and_wait_until_running(
             encoding=encoding, request=start_live_encoding_request
         )
 
         live_encoding = self._wait_for_live_encoding_details(encoding=encoding)
-        return (encoding, live_encoding, [hls_manifest, dash_manifest])
+        return (encoding, live_encoding, [hls_manifest])
 
-    def determine_origin_urls(self, manifests: List[bm.HlsManifest | bm.DashManifest]):
+    def determine_origin_urls(self, manifests: List[bm.HlsManifest]):
         baseurl = f"https://{self.output.bucket_name}.s3.amazonaws.com/"
         manifest_urls = []
 
@@ -394,25 +343,6 @@ class BitmovinController:
             encoding_id=encoding.id, ts_muxing=muxing
         )
 
-    def _create_fmp4_muxing(
-        self,
-        encoding: bm.Encoding,
-        output: bm.Output,
-        output_path: str,
-        stream: bm.Stream,
-    ) -> bm.Fmp4Muxing:
-        muxing = bm.Fmp4Muxing(
-            outputs=[
-                self._build_encoding_output(output=output, output_path=output_path)
-            ],
-            segment_length=cfg.SEGMENT_DURATION,
-            streams=[bm.MuxingStream(stream_id=stream.id)],
-        )
-
-        return self.encoding_api.encodings.muxings.fmp4.create(
-            encoding_id=encoding.id, fmp4_muxing=muxing
-        )
-
     def _create_aac_audio_configuration(self, bitrate: int) -> bm.AacAudioConfiguration:
         config = bm.AacAudioConfiguration(
             name="AAC {0} kbit/s".format(bitrate / 1000), bitrate=bitrate
@@ -434,61 +364,6 @@ class BitmovinController:
         )
 
         return self.hls_api.create(hls_manifest=hls_manifest)
-
-    def _generate_dash_manifest(
-        self, output: bm.Output, output_path: str
-    ) -> Tuple[
-        bm.DashManifest, bm.Period, bm.VideoAdaptationSet, bm.AudioAdaptationSet
-    ]:
-        dash_manifest = self.dash_api.create(
-            dash_manifest=bm.DashManifest(
-                name="DASH/isoff-live Manifest",
-                manifest_name="stream.mpd",
-                outputs=[self._build_encoding_output(output, output_path)],
-                profile=bm.DashProfile.LIVE,
-            )
-        )
-
-        period = self.dash_api.periods.create(
-            manifest_id=dash_manifest.id, period=bm.Period()
-        )
-
-        video_adaptation_set = self.dash_api.periods.adaptationsets.video.create(
-            manifest_id=dash_manifest.id,
-            period_id=period.id,
-            video_adaptation_set=bm.VideoAdaptationSet(),
-        )
-
-        audio_adaptation_set = self.dash_api.periods.adaptationsets.audio.create(
-            manifest_id=dash_manifest.id,
-            period_id=period.id,
-            audio_adaptation_set=bm.AudioAdaptationSet(lang="en"),
-        )
-
-        return (dash_manifest, period, video_adaptation_set, audio_adaptation_set)
-
-    def _add_dash_representation(
-        self,
-        encoding: bm.Encoding,
-        dash_manifest: bm.DashManifest,
-        period: bm.Period,
-        adaptation_set: bm.AdaptationSet,
-        fmp4_muxing: bm.Fmp4Muxing,
-        relative_path: str,
-    ) -> bm.DashFmp4Representation:
-        representation = bm.DashFmp4Representation(
-            type_=bm.DashRepresentationType.TEMPLATE,
-            encoding_id=encoding.id,
-            muxing_id=fmp4_muxing.id,
-            segment_path=relative_path,
-        )
-
-        return self.dash_api.periods.adaptationsets.representations.fmp4.create(
-            manifest_id=dash_manifest.id,
-            period_id=period.id,
-            adaptationset_id=adaptation_set.id,
-            dash_fmp4_representation=representation,
-        )
 
     def _add_hls_variant(
         self,

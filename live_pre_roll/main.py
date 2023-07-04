@@ -61,12 +61,8 @@ def main():
     print("Creating the broadpeak.io SSAI service")
     streaming_urls = []
     for url in manifest_urls:
-        format = None
-        if url.endswith("m3u8"):
-            format = "HLS"
-        if url.endswith("mpd"):
-            format = "DASH"
-
+        format = "HLS"
+        
         live_source = broadpeakio.create_live_source(
             name=f"Bitmovin Live - {stream_id} - {format}", url=url
         )
