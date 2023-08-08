@@ -85,9 +85,6 @@ CDN_FQDN = "my-domain.my-cdn.net"
 # === Encoding and Packaging Configuration ===
 # WARNING: changing the configuration below may require you to ask for a change in the
 # transcoding profile configuration on the broadpeak.io side.
-
-FRAME_RATE = 24.0
-
 VIDEO_LADDER = [
     VideoRung(
         height=240,
@@ -124,7 +121,12 @@ AUDIO_LADDER = [
     AudioRung(bitrate=128_000),
 ]
 
-SEGMENT_DURATION = 8.0
+# Set FRAME_RATE to None to retain the source frame rate 
+# and avoid frame rate conversion (recommended).
+FRAME_RATE = 24.0
+
+# Segment duration applies to both HLS and DASH
+SEGMENT_DURATION = 4.0
 
 
 # === Miscellaneous ===
