@@ -3,45 +3,53 @@ import sys
 from typing import Dict, List, Tuple
 from urllib.parse import urlparse
 
-import config as cfg
 import requests
+
+API_BASE_URL = "https://api.broadpeak.io"
 
 
 class BroadpeakIOController:
-    def __init__(self) -> None:
+    def __init__(self, config) -> None:
+        self.config = config
         self.headers = {
             "accept": "application/json",
             "content-type": "application/json",
-            "authorization": f"Bearer {cfg.BPKIO_API_KEY}",
+            "authorization": f"Bearer {self.config.BPKIO_API_KEY}",
         }
 
-        if not hasattr(cfg, "TRANSCODING_PROFILE_ID"):
+        if not hasattr(self.config, "TRANSCODING_PROFILE_ID"):
             print("You need to provide a Transcoding Profile ID in the config file")
             self.build_transcoding_profile_config()
-            sys.exit(1)
+            sys.exit(0)
 
     def create_resources(
         self, service_name: str, origin_urls: List[str]
     ) -> Tuple[Dict, Dict, Dict]:
         """Create resources for the broadpeak.io service"""
-        if hasattr(cfg, "AD_SERVER_ID"):
-            ad_server = self._get_ad_server(getattr(cfg, "AD_SERVER_ID"))
+        if hasattr(self.config, "AD_SERVER_ID"):
+            ad_server = self._get_ad_server(getattr(self.config, "AD_SERVER_ID"))
         else:
-            ad_server = self._create_ad_server_ad_proxy_vmap_gen(vast_tag=cfg.VAST_TAG)
+            ad_server = self._create_ad_server_ad_proxy_vmap_gen(
+                vast_tag=self.config.VAST_TAG
+            )
 
-        if hasattr(cfg, "ASSET_CATALOG_ID"):
-            asset_catalog = self._get_asset_catalog(getattr(cfg, "ASSET_CATALOG_ID"))
+        if hasattr(self.config, "ASSET_CATALOG_ID"):
+            asset_catalog = self._get_asset_catalog(
+                getattr(self.config, "ASSET_CATALOG_ID")
+            )
         else:
             asset_catalog = self._create_asset_catalog(origin_urls=origin_urls)
 
-        if hasattr(cfg, "AVOD_SERVICE_ID"):
-            avod_service = self._get_avod_service(getattr(cfg, "AVOD_SERVICE_ID"))
+        if hasattr(self.config, "AVOD_SERVICE_ID"):
+            avod_service = self._get_avod_service(
+                getattr(self.config, "AVOD_SERVICE_ID")
+            )
         else:
             avod_service = self._create_avod_service(
                 service_name=service_name,
                 ad_server_id=ad_server["id"],
                 asset_catalog_id=asset_catalog["id"],
-                transcoding_profile_id=cfg.TRANSCODING_PROFILE_ID,
+                transcoding_profile_id=self.config.TRANSCODING_PROFILE_ID,
             )
 
         return (ad_server, asset_catalog, avod_service)
@@ -49,7 +57,9 @@ class BroadpeakIOController:
     def _create_asset_catalog(self, origin_urls: List[str]) -> Dict:
         # Define source URL from origin_urls
         url = origin_urls[0]
-        pos = url.find(cfg.S3_OUTPUT_BASE_PATH) + len(cfg.S3_OUTPUT_BASE_PATH)
+        pos = url.find(self.config.S3_OUTPUT_BASE_PATH) + len(
+            self.config.S3_OUTPUT_BASE_PATH
+        )
 
         asset_catalog_payload = {
             "name": "Bitmovin AVOD outputs",
@@ -58,13 +68,13 @@ class BroadpeakIOController:
         }
 
         return self._post_wrapper(
-            endpoint_url="https://api.broadpeak.io/v1/sources/asset-catalog",
+            endpoint_url=f"{API_BASE_URL}/v1/sources/asset-catalog",
             payload=asset_catalog_payload,
         )
 
     def _get_asset_catalog(self, id: int):
         return self._get_wrapper(
-            endpoint_url=f"https://api.broadpeak.io/v1/sources/asset-catalog/{id}"
+            endpoint_url=f"{API_BASE_URL}/v1/sources/asset-catalog/{id}"
         )
 
     def _create_ad_server_ad_proxy_vmap_gen(self, vast_tag: str):
@@ -82,13 +92,13 @@ class BroadpeakIOController:
         }
 
         return self._post_wrapper(
-            endpoint_url="https://api.broadpeak.io/v1/sources/ad-server",
+            endpoint_url=f"{API_BASE_URL}/v1/sources/ad-server",
             payload=ad_proxy_payload,
         )
 
     def _get_ad_server(self, id: int):
         return self._get_wrapper(
-            endpoint_url=f"https://api.broadpeak.io/v1/sources/ad-server/{id}"
+            endpoint_url=f"{API_BASE_URL}/v1/sources/ad-server/{id}"
         )
 
     def _create_avod_service(
@@ -107,13 +117,13 @@ class BroadpeakIOController:
         }
 
         return self._post_wrapper(
-            endpoint_url="https://api.broadpeak.io/v1/services/ad-insertion",
+            endpoint_url=f"{API_BASE_URL}/v1/services/ad-insertion",
             payload=adinsertion_service_payload,
         )
 
     def _get_avod_service(self, id: int):
         return self._get_wrapper(
-            endpoint_url=f"https://api.broadpeak.io/v1/services/ad-insertion/{id}"
+            endpoint_url=f"{API_BASE_URL}/v1/services/ad-insertion/{id}"
         )
 
     def calculate_streaming_urls(
@@ -124,8 +134,10 @@ class BroadpeakIOController:
 
         for origin_url in origin_manifest_urls:
             service_url = adinsertion_service["url"]
-            if hasattr(cfg, "CDN_FQDN"):
-                service_url = service_url.replace("stream.broadpeak.io", cfg.CDN_FQDN)
+            if hasattr(self.config, "CDN_FQDN"):
+                service_url = service_url.replace(
+                    "stream.broadpeak.io", self.config.CDN_FQDN
+                )
 
             origin_url = urlparse(origin_url)
             source_url = urlparse(adinsertion_service["source"]["url"])
@@ -133,7 +145,9 @@ class BroadpeakIOController:
             full_url = "{base}{asset}?bpkio_mids={mids}".format(
                 base=service_url,
                 asset=origin_url.path.replace(source_url.path, ""),
-                mids=",".join([str(i) for i in cfg.SPLICE_POINTS]),
+                mids=",".join([str(i) for i in self.config.SPLICE_POINTS])
+                if hasattr(self.config, "SPLICE_POINTS")
+                else "",
             )
             streaming_urls.append(full_url)
 
@@ -169,21 +183,22 @@ class BroadpeakIOController:
                         "scale": f"-2:{r.height}",
                         "bitratev": str(r.bitrate),
                         "profilev": r.profile,
-                        "frameratev": str(cfg.FRAME_RATE),
+                        "frameratev": str(self.config.FRAME_RATE),
                     }
-                    for r in cfg.VIDEO_LADDER
+                    for r in self.config.VIDEO_LADDER
                 ],
                 "common": {
                     "codeca": "aac",
                     "codecv": "h264",
                     "preset": "veryfast",
-                    "bitratea": str(cfg.AUDIO_LADDER[0].bitrate),
+                    "bitratea": str(self.config.AUDIO_LADDER[0].bitrate),
                     "loudnorm": "I=-23:TP=-1",
                 },
             },
         }
 
-        print(
-            "Ask your broadpeak.io account manager to add the following profile to your account"
-        )
         print(json.dumps(config, indent=4))
+        print(
+            "Ask your broadpeak.io account manager to add the profile above to your account. \n"
+            "Then add its identifier in the config.py file, before re-running the script."
+        )

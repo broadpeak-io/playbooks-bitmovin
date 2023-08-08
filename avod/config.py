@@ -6,25 +6,30 @@ VideoRung = namedtuple("VideoRung", "height bitrate profile level")
 AudioRung = namedtuple("AudioRung", "bitrate")
 
 
+# Unique identifier for the job
+JOB_ID = "avod-conditioned"
+
+
 # === broadpeak.io ===
 # broadpeak.io API key
 BPKIO_API_KEY = os.getenv("BPKIO_API_KEY")
 
 # ID of the transcoding profile to use.
-# Talk to your account manager if you don't have a suitable one, and make sure
-# that it matches the profile defined below in this file.
-TRANSCODING_PROFILE_ID = 1234
+# Run this script with the following line commented out to get a profile definition
+# that you can pass to your broadpeak.io account manager to add to your account.
+# Then, set the identifier in the line below and uncomment it before re-running the script.
+# TRANSCODING_PROFILE_ID =
 
 # ID of the asset catalog source to use. Comment out to create a new one automatically
-# ASSET_CATALOG_ID = 1234
+# ASSET_CATALOG_ID =
 
 # ID of the AVOD service. Comment out to create a new one automatically
-# AVOD_SERVICE_ID = 1234
+# AVOD_SERVICE_ID =
 
 # -- Ad Server
 # ID of an Ad Proxy (VMAP Generator) source.
 # Comment out to create a new one automatically
-# AD_SERVER_ID = 1234
+# AD_SERVER_ID = 60308
 
 # URL of the VAST tag that will be used by the ad proxy (at creation)
 VAST_TAG = "https://bpkiovast.s3.eu-west-1.amazonaws.com/vastbpkio10s"
@@ -37,8 +42,20 @@ BITMOVIN_TENANT_ORG_ID = os.getenv("BITMOVIN_TENANT_ORG_ID")
 
 
 # === Source File ===
-# relative path to the source file (from the root of the HTTPS server)
-SOURCE_FILE_PATH = "https://bpkioassets.s3-eu-west-1.amazonaws.com/ToS-full-dubbed-subs/TOS-original-24fps-1080p.mp4"
+SOURCE_FILE_PATH = (
+    "https://bpkioassets.s3-eu-west-1.amazonaws.com/ToS-full-dubbed-subs/"
+)
+# relative path to the source file (from the SOURCE_FILE_PATH)
+SOURCE_FILE_PATH_VIDEO = "TOS-original-24fps-1080p.mp4"
+SOURCE_FILE_PATHS_AUDIO = {
+    "en": "TOS-original-24fps-1080p.mp4",
+    "it": "TOS-dubbed-it.mp3",
+}
+SOURCE_FILE_PATHS_SUBTITLES = {
+    "en": "tears-of-steel-en.srt",
+    "fr": "tears-of-steel-fr.srt",
+    "de": "tears-of-steel-de.srt",
+}
 
 # Bitmovin ID of the HTTPS input that contains the source files.
 # Comment out to have one created automatically from the source file path
@@ -57,12 +74,12 @@ S3_OUTPUT_ACCESS_KEY = os.getenv("S3_OUTPUT_ACCESS_KEY")
 S3_OUTPUT_SECRET_KEY = os.getenv("S3_OUTPUT_SECRET_KEY")
 
 # Root folder under which the outputs will be stored
-S3_OUTPUT_BASE_PATH = "outputs/vod/"
+S3_OUTPUT_BASE_PATH = "/AVOD/"
 
 
 # === CDN ===
 # If a CDN is used to stream the content, provide its FQDN
-# CDN_FQDN = "mydistribution.cloudfront.net"
+CDN_FQDN = "my-domain.my-cdn.net"
 
 
 # === Encoding and Packaging Configuration ===
@@ -107,4 +124,12 @@ AUDIO_LADDER = [
     AudioRung(bitrate=128_000),
 ]
 
-SEGMENT_DURATION = 2.0
+SEGMENT_DURATION = 8.0
+
+
+# === Miscellaneous ===
+# Specific language labels for subtitles or audio streams,
+# for more readible information in players
+LANGUAGE_LABELS = dict(
+    en="English", it="Italiano", fr="Français", de="Deutsch", ar="عربي"
+)

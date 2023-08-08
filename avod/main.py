@@ -1,43 +1,58 @@
+import argparse
+import importlib
 import random
 import string
 from os import path
 from urllib.parse import urlparse
 
-import config as cfg
 from bitmovin import BitmovinController
 from broadpeak import BroadpeakIOController
 
 
 def main():
+    args = parse_arguments()
+
+    cfg = importlib.import_module(args.config)
+
     # Initialising the broadpeak.io APIs
-    broadpeakio = BroadpeakIOController()
+    broadpeakio = BroadpeakIOController(config=cfg)
 
     # Initalising the Bitmovin SDK
-    bitmovin = BitmovinController()
+    bitmovin = BitmovinController(config=cfg)
 
     # Defining some names for resources
-    asset_name = path.splitext(path.basename(cfg.SOURCE_FILE_PATH))[0]
-    uid = generate_random_string()
+    asset_name = path.splitext(path.basename(cfg.SOURCE_FILE_PATH_VIDEO))[0]
+    if hasattr(cfg, "JOB_ID"):
+        uid = cfg.JOB_ID
+    else:
+        uid = generate_random_string()
 
-    encoding_name = f"Conditioned VOD - {asset_name} - test {uid}"
+    encoding_name = f"{asset_name} - {uid}"
     output_prefix = f"{asset_name}/{uid}"
-    ssai_service_name = f"Bitmovin AVOD w/ VMAP Generator - test {uid}"
+    ssai_service_name = f"AVOD w/ Bitmovin encoding and Ad Proxy - {uid}"
 
     # Encoding and packaging the asset with Bitmovin
-    print("Starting the Bitmovin encoder")
+    print("Configuring and starting the Bitmovin encoder")
     (_, manifests) = bitmovin.encode_and_package(
         name=encoding_name,
-        source_file_path=urlparse(cfg.SOURCE_FILE_PATH).path,
+        source_path=urlparse(cfg.SOURCE_FILE_PATH).path,
+        source_video_file=cfg.SOURCE_FILE_PATH_VIDEO,
+        source_audio_files=cfg.SOURCE_FILE_PATHS_AUDIO,
+        source_subtitle_files=cfg.SOURCE_FILE_PATHS_SUBTITLES,
         output_sub_path=output_prefix,
     )
 
-    manifest_urls = bitmovin.determine_origin_urls(manifests)
-    print("Manifest URLs on the origin: ")
-    for url in manifest_urls:
-        print(f"- {url}")
+    # List the outputs
+    print("Outputs:")
+    manifest_urls = []
+    for manifest in manifests:
+        manifest_url = bitmovin.determine_origin_url(manifest)
+        print("Manifest URL: " + manifest_url)
+        manifest_urls.append(manifest_url)
 
     # Creating the broadpeak.io resources
-    (_, _, service) = broadpeakio.create_resources(
+    print("broadpeak.io resources:")
+    (ad_server, asset_catalog, service) = broadpeakio.create_resources(
         origin_urls=manifest_urls, service_name=ssai_service_name
     )
 
@@ -63,6 +78,13 @@ def generate_random_string(length=8):
     source = string.ascii_letters + string.digits
     result_str = "".join((random.choice(source) for i in range(length)))
     return result_str
+
+
+# parse arguments with argparse
+def parse_arguments():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("-c", "--config", help="path to config file", default="config")
+    return parser.parse_args()
 
 
 if __name__ == "__main__":

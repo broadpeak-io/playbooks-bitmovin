@@ -1,17 +1,18 @@
+import os
 from os import path
 from time import sleep
-from typing import List, Tuple
+from typing import Dict, List, Optional, Tuple
 from urllib.parse import urlparse
 
 import bitmovin_api_sdk as bm
-import config as cfg
 
 
 class BitmovinController:
-    def __init__(self) -> None:
+    def __init__(self, config) -> None:
+        self.config = config
         self.bitmovin_api = bm.BitmovinApi(
-            api_key=cfg.BITMOVIN_API_KEY,
-            tenant_org_id=getattr(cfg, "BITMOVIN_TENANT_ORG_ID", ""),
+            api_key=self.config.BITMOVIN_API_KEY,
+            tenant_org_id=getattr(self.config, "BITMOVIN_TENANT_ORG_ID", ""),
             # logger=bm.BitmovinApiLogger(),
         )
 
@@ -19,43 +20,44 @@ class BitmovinController:
         self.dash_api = self.bitmovin_api.encoding.manifests.dash
         self.hls_api = self.bitmovin_api.encoding.manifests.hls
 
-        if hasattr(cfg, "HTTPS_INPUT_ID"):
-            self.input = self._get_https_input(input_id=cfg.HTTPS_INPUT_ID)
+        if hasattr(self.config, "HTTPS_INPUT_ID"):
+            self.input = self._get_https_input(input_id=self.config.HTTPS_INPUT_ID)
         else:
-            self.input = self._create_https_input(source_path=cfg.SOURCE_FILE_PATH)
+            self.input = self._create_https_input(
+                source_path=self.config.SOURCE_FILE_PATH
+            )
             print(f"Created HTTPS input with id {self.input.id}")
 
-        if hasattr(cfg, "S3_OUTPUT_ID"):
-            self.output = self._get_s3_output(output_id=cfg.S3_OUTPUT_ID)
+        if hasattr(self.config, "S3_OUTPUT_ID"):
+            self.output = self._get_s3_output(output_id=self.config.S3_OUTPUT_ID)
         else:
             self.output = self._create_s3_output(
-                bucket_name=getattr(cfg, "S3_OUTPUT_BUCKET_NAME"),
-                access_key=getattr(cfg, "S3_OUTPUT_ACCESS_KEY"),
-                secret_key=getattr(cfg, "S3_OUTPUT_SECRET_KEY"),
+                bucket_name=getattr(self.config, "S3_OUTPUT_BUCKET_NAME"),
+                access_key=getattr(self.config, "S3_OUTPUT_ACCESS_KEY"),
+                secret_key=getattr(self.config, "S3_OUTPUT_SECRET_KEY"),
             )
             print(f"Created S3 output with id {self.output.id}")
 
     def encode_and_package(
         self,
         name: str,
-        source_file_path: str,
+        source_path: str,
+        source_video_file: str,
+        source_audio_files: Dict[str, str],
+        source_subtitle_files: Dict[str, str],
         output_sub_path: str,
     ) -> Tuple[bm.Encoding, List[bm.HlsManifest | bm.DashManifest]]:
-        encoding = self._create_encoding(name=name, description="")
+        self.encoding = self._create_encoding(name=name, description="")
 
         # Manifests
         (
             dash_manifest,
             period,
-            video_adaptation_set,
-            audio_adaptation_set,
-        ) = self._generate_dash_manifest(
-            output=self.output, output_path=output_sub_path
+        ) = self._generate_dash_manifest_with_single_period(
+            output_path=output_sub_path,
         )
 
-        hls_manifest = self._generate_hls_manifest(
-            output=self.output, output_path=output_sub_path
-        )
+        hls_manifest = self._generate_hls_manifest(output_path=output_sub_path)
 
         # ABR Ladder
         video_configurations = [
@@ -64,43 +66,42 @@ class BitmovinController:
                 bitrate=r.bitrate,
                 profile=bm.ProfileH264(r.profile.upper()),
                 level=bm.LevelH264(r.level),
-                rate=cfg.FRAME_RATE,
+                rate=self.config.FRAME_RATE,
             )
-            for r in cfg.VIDEO_LADDER
+            for r in self.config.VIDEO_LADDER
         ]
 
         audio_configurations = [
             self._create_aac_audio_configuration(bitrate=r.bitrate)
-            for r in cfg.AUDIO_LADDER
+            for r in self.config.AUDIO_LADDER
         ]
 
-        # create video streams, muxings, dash representations and hls variant playlists
+        webvtt_subtitle_configuration = self._create_webvtt_configuration()
+        sidecars = {}
+
+        # create video stream, muxings, dash representations and hls variant playlists
+        video_adaptation_set = self._add_video_adaptation_set(
+            dash_manifest=dash_manifest, period=period
+        )
         for i, video_config in enumerate(video_configurations):
             h264_video_stream = self._create_stream(
-                encoding=encoding,
-                input=self.input,
-                input_path=source_file_path,
+                input_path=os.path.join(source_path, source_video_file),
                 codec_configuration=video_config,
             )
 
             relative_path_ts = f"video/{video_config.bitrate}/ts"
             ts_muxing = self._create_ts_muxing(
-                encoding=encoding,
-                output=self.output,
                 output_path=f"{output_sub_path}/{relative_path_ts}",
                 stream=h264_video_stream,
             )
 
             relative_path_fmp4 = f"video/{video_config.bitrate}/fmp4"
             fmp4_muxing = self._create_fmp4_muxing(
-                encoding=encoding,
-                output=self.output,
                 output_path=f"{output_sub_path}/{relative_path_fmp4}",
                 stream=h264_video_stream,
             )
 
-            self._add_dash_representation(
-                encoding=encoding,
+            self._add_dash_fmp4_representation(
                 dash_manifest=dash_manifest,
                 period=period,
                 adaptation_set=video_adaptation_set,
@@ -109,7 +110,6 @@ class BitmovinController:
             )
 
             self._add_hls_variant(
-                encoding=encoding,
                 hls_manifest=hls_manifest,
                 stream=h264_video_stream,
                 ts_muxing=ts_muxing,
@@ -117,50 +117,93 @@ class BitmovinController:
                 filename_suffix=f"{video_config.height}p_{video_config.bitrate}",
             )
 
-        # create audio streams and muxings
-        for i, audio_config in enumerate(audio_configurations):
-            audio_stream = self._create_stream(
-                encoding=encoding,
-                input=self.input,
-                input_path=source_file_path,
-                codec_configuration=audio_config,
-            )
-
-            relative_path_ts = f"audio/{audio_config.bitrate}/ts"
-            ts_muxing = self._create_ts_muxing(
-                encoding=encoding,
-                output=self.output,
-                output_path=f"{output_sub_path}/{relative_path_ts}",
-                stream=audio_stream,
-            )
-
-            relative_path_fmp4 = f"audio/{audio_config.bitrate}/fmp4"
-            fmp4_muxing = self._create_fmp4_muxing(
-                encoding=encoding,
-                output=self.output,
-                output_path=f"{output_sub_path}/{relative_path_fmp4}",
-                stream=audio_stream,
-            )
-
-            self._add_dash_representation(
-                encoding=encoding,
+        # create audio streams and muxings, dash representations and hls media playlists
+        for lang, source_audio_file in source_audio_files.items():
+            audio_adaptation_set = self._add_audio_adaptation_set(
                 dash_manifest=dash_manifest,
                 period=period,
-                adaptation_set=audio_adaptation_set,
-                fmp4_muxing=fmp4_muxing,
-                relative_path=relative_path_fmp4,
+                lang=self._make_language_label(lang),
             )
 
-            self._add_hls_media(
-                encoding=encoding,
+            for i, audio_config in enumerate(audio_configurations):
+                audio_stream = self._create_stream(
+                    input_path=os.path.join(source_path, source_audio_file),
+                    codec_configuration=audio_config,
+                    language=lang,
+                )
+
+                relative_path_ts = f"audio_{lang}/{audio_config.bitrate}/ts"
+                ts_muxing = self._create_ts_muxing(
+                    output_path=f"{output_sub_path}/{relative_path_ts}",
+                    stream=audio_stream,
+                )
+
+                relative_path_fmp4 = f"audio_{lang}/{audio_config.bitrate}/fmp4"
+                fmp4_muxing = self._create_fmp4_muxing(
+                    output_path=f"{output_sub_path}/{relative_path_fmp4}",
+                    stream=audio_stream,
+                )
+
+                self._add_dash_fmp4_representation(
+                    dash_manifest=dash_manifest,
+                    period=period,
+                    adaptation_set=audio_adaptation_set,
+                    fmp4_muxing=fmp4_muxing,
+                    relative_path=relative_path_fmp4,
+                )
+
+                self._add_hls_media(
+                    hls_manifest=hls_manifest,
+                    stream=audio_stream,
+                    ts_muxing=ts_muxing,
+                    relative_path=relative_path_ts,
+                    filename_suffix=f"{audio_config.bitrate}",
+                    language=lang,
+                    label=self._make_language_label(lang),
+                )
+
+        # create subtitle streams and muxings
+        for lang, source_sub_file in source_subtitle_files.items():
+            # In-manifest HLS
+            vtt_subtitle_stream = self._create_subtitle_stream(
+                input_path=os.path.join(source_path, source_sub_file),
+                codec_configuration=webvtt_subtitle_configuration,
+                language=lang,
+            )
+
+            relative_path_vtt = f"subtitles_{lang}/vtt"
+            vtt_chunked_text_muxing = self._create_chunked_text_muxing(
+                output_path=f"{output_sub_path}/{relative_path_vtt}",
+                stream=vtt_subtitle_stream,
+                extension="vtt",
+            )
+
+            self._add_hls_subtitle_media(
                 hls_manifest=hls_manifest,
-                stream=audio_stream,
-                ts_muxing=ts_muxing,
-                relative_path=relative_path_ts,
-                filename_suffix=f"{audio_config.bitrate}",
+                stream=vtt_subtitle_stream,
+                text_muxing=vtt_chunked_text_muxing,
+                relative_path=relative_path_vtt,
+                label=self._make_language_label(lang),
+                language=lang,
             )
 
-        self._create_keyframes(encoding=encoding, splice_points=cfg.SPLICE_POINTS)
+            # In-manifest DASH
+            subtitle_adaptation_set = self._add_subtitle_adaptation_set(
+                dash_manifest=dash_manifest,
+                period=period,
+                lang=self._make_language_label(lang),
+            )
+
+            self._add_dash_chunked_text_representation(
+                dash_manifest=dash_manifest,
+                period=period,
+                adaptation_set=subtitle_adaptation_set,
+                text_muxing=vtt_chunked_text_muxing,
+                relative_path=relative_path_vtt,
+            )
+
+        if hasattr(self.config, "SPLICE_POINTS"):
+            self._create_keyframes(splice_points=self.config.SPLICE_POINTS)
 
         start_encoding_request = bm.StartEncodingRequest(
             manifest_generator=bm.ManifestGenerator.V2
@@ -173,28 +216,21 @@ class BitmovinController:
             bm.ManifestResource(manifest_id=dash_manifest.id)
         ]
 
-        self._execute_encoding(
-            encoding=encoding, start_encoding_request=start_encoding_request
+        self._execute_encoding(start_encoding_request=start_encoding_request)
+
+        return (self.encoding, [hls_manifest, dash_manifest])
+
+    def determine_origin_url(self, resource: bm.HlsManifest | bm.DashManifest) -> str:
+        baseurl = f"https://{self.output.bucket_name}.s3.amazonaws.com/"
+
+        return "/".join(
+            p.strip("/")
+            for p in [baseurl, resource.outputs[0].output_path, resource.manifest_name]
         )
 
-        return (encoding, [hls_manifest, dash_manifest])
-
-    def determine_origin_urls(self, manifests: List[bm.HlsManifest | bm.DashManifest]):
-        baseurl = f"https://{self.output.bucket_name}.s3.amazonaws.com/"
-        manifest_urls = []
-
-        for manifest in manifests:
-            manifest_url = path.join(
-                baseurl + manifest.outputs[0].output_path + "/" + manifest.manifest_name
-            )
-
-            manifest_urls.append(manifest_url)
-
-        return manifest_urls
-
-    def _poll_encoding_status(self, encoding: bm.Encoding) -> bm.Task:
+    def _poll_encoding_status(self) -> bm.Task:
         sleep(5)
-        task = self.encoding_api.encodings.status(encoding_id=encoding.id)
+        task = self.encoding_api.encodings.status(encoding_id=self.encoding.id)
         print(
             "Encoding status is {} (progress: {} %)".format(
                 task.status.value, task.progress
@@ -202,19 +238,19 @@ class BitmovinController:
         )
         return task
 
-    def _execute_encoding(self, encoding, start_encoding_request):
+    def _execute_encoding(self, start_encoding_request):
         self.encoding_api.encodings.start(
-            encoding_id=encoding.id, start_encoding_request=start_encoding_request
+            encoding_id=self.encoding.id, start_encoding_request=start_encoding_request
         )
 
-        task = self._poll_encoding_status(encoding=encoding)
+        task = self._poll_encoding_status()
 
         while task.status not in [
             bm.Status.FINISHED,
             bm.Status.ERROR,
             bm.Status.CANCELED,
         ]:
-            task = self._poll_encoding_status(encoding=encoding)
+            task = self._poll_encoding_status()
 
         if task.status is bm.Status.ERROR:
             self._log_task_errors(task=task)
@@ -227,7 +263,7 @@ class BitmovinController:
 
         return self.encoding_api.encodings.create(encoding=encoding)
 
-    def _create_keyframes(self, encoding, splice_points):
+    def _create_keyframes(self, splice_points):
         keyframes = []
 
         for splice_point in splice_points:
@@ -235,7 +271,7 @@ class BitmovinController:
 
             keyframes.append(
                 self.encoding_api.encodings.keyframes.create(
-                    encoding_id=encoding.id, keyframe=keyframe
+                    encoding_id=self.encoding.id, keyframe=keyframe
                 )
             )
 
@@ -274,7 +310,7 @@ class BitmovinController:
         bitrate: int,
         profile: bm.ProfileH264,
         level: bm.LevelH264,
-        rate: float,
+        rate: Optional[float] = None,
     ) -> bm.H264VideoConfiguration:
         config = bm.H264VideoConfiguration(
             name="H.264 {0} {1} Mbit/s".format(height, bitrate / (1000 * 1000)),
@@ -287,7 +323,7 @@ class BitmovinController:
         )
 
         # For correct alignment between content and ads, it's critical that the Bitmovin
-        # encoding abides by the selected profile. The following code makes sure of it,
+        # encoding complies with the selected profile. The following code makes sure of it,
         # see https://developer.bitmovin.com/encoding/docs/h264-presets#conformance-with-h264-profiles,
         # written by the author when he was working at Bitmovin ;)
 
@@ -307,65 +343,6 @@ class BitmovinController:
             h264_video_configuration=config
         )
 
-    def _create_stream(
-        self,
-        encoding: bm.Encoding,
-        input: bm.Input,
-        input_path: str,
-        codec_configuration: bm.CodecConfiguration,
-    ) -> bm.Stream:
-        stream_input = bm.StreamInput(
-            input_id=input.id,
-            input_path=input_path,
-            selection_mode=bm.StreamSelectionMode.AUTO,
-        )
-
-        stream = bm.Stream(
-            input_streams=[stream_input], codec_config_id=codec_configuration.id
-        )
-
-        return self.encoding_api.encodings.streams.create(
-            encoding_id=encoding.id, stream=stream
-        )
-
-    def _create_ts_muxing(
-        self,
-        encoding: bm.Encoding,
-        output: bm.Output,
-        output_path: str,
-        stream: bm.Stream,
-    ) -> bm.TsMuxing:
-        muxing = bm.TsMuxing(
-            outputs=[
-                self._build_encoding_output(output=output, output_path=output_path)
-            ],
-            segment_length=cfg.SEGMENT_DURATION,
-            streams=[bm.MuxingStream(stream_id=stream.id)],
-        )
-
-        return self.encoding_api.encodings.muxings.ts.create(
-            encoding_id=encoding.id, ts_muxing=muxing
-        )
-
-    def _create_fmp4_muxing(
-        self,
-        encoding: bm.Encoding,
-        output: bm.Output,
-        output_path: str,
-        stream: bm.Stream,
-    ) -> bm.Fmp4Muxing:
-        muxing = bm.Fmp4Muxing(
-            outputs=[
-                self._build_encoding_output(output=output, output_path=output_path)
-            ],
-            segment_length=cfg.SEGMENT_DURATION,
-            streams=[bm.MuxingStream(stream_id=stream.id)],
-        )
-
-        return self.encoding_api.encodings.muxings.fmp4.create(
-            encoding_id=encoding.id, fmp4_muxing=muxing
-        )
-
     def _create_aac_audio_configuration(self, bitrate: int) -> bm.AacAudioConfiguration:
         config = bm.AacAudioConfiguration(
             name="AAC {0} kbit/s".format(bitrate / 1000), bitrate=bitrate
@@ -375,11 +352,135 @@ class BitmovinController:
             aac_audio_configuration=config
         )
 
-    def _generate_hls_manifest(
-        self, output: bm.Output, output_path: str
-    ) -> bm.HlsManifest:
+    def _create_webvtt_configuration(self) -> bm.WebVttConfiguration:
+        config = bm.WebVttConfiguration(
+            name="WebVTT",
+            # styling=bm.WebVttStyling(mode=bm.WebVttStylingMode.PASSTHROUGH),
+            cue_identifier_policy=bm.WebVttCueIdentifierPolicy.OMIT_IDENTIFIERS,
+            append_optional_zero_hour=True,
+        )
+
+        return self.encoding_api.configurations.subtitles.webvtt.create(
+            web_vtt_configuration=config
+        )
+
+    def _create_stream(
+        self,
+        input_path: str,
+        codec_configuration: bm.CodecConfiguration,
+        language: Optional[str] = None,
+    ) -> bm.Stream:
+        stream_input = bm.StreamInput(
+            input_id=self.input.id,
+            input_path=input_path,
+            selection_mode=bm.StreamSelectionMode.AUTO,
+        )
+
+        stream = bm.Stream(
+            input_streams=[stream_input], codec_config_id=codec_configuration.id
+        )
+        if language:
+            stream.metadata = bm.StreamMetadata(language=language)
+
+        return self.encoding_api.encodings.streams.create(
+            encoding_id=self.encoding.id, stream=stream
+        )
+
+    def _create_subtitle_stream(
+        self,
+        input_path: str,
+        codec_configuration: bm.CodecConfiguration,
+        language: Optional[str] = None,
+    ) -> bm.Stream:
+        input_stream = bm.FileInputStream(input_id=self.input.id, input_path=input_path)
+        if input_path.endswith(".srt"):
+            input_stream.file_type = bm.FileInputStreamType.SRT
+        if input_path.endswith(".vtt"):
+            input_stream.file_type = bm.FileInputStreamType.WEBVTT
+
+        input_stream = self.encoding_api.encodings.input_streams.file.create(
+            encoding_id=self.encoding.id, file_input_stream=input_stream
+        )
+
+        stream_input = bm.StreamInput(input_stream_id=input_stream.id)
+
+        stream = bm.Stream(
+            input_streams=[stream_input], codec_config_id=codec_configuration.id
+        )
+
+        return self.encoding_api.encodings.streams.create(
+            encoding_id=self.encoding.id, stream=stream
+        )
+
+    def _create_ts_muxing(
+        self,
+        output_path: str,
+        stream: bm.Stream,
+    ) -> bm.TsMuxing:
+        muxing = bm.TsMuxing(
+            outputs=[self._build_encoding_output(output_path=output_path)],
+            segment_length=self.config.SEGMENT_DURATION,
+            streams=[bm.MuxingStream(stream_id=stream.id)],
+            start_offset=10,
+        )
+
+        return self.encoding_api.encodings.muxings.ts.create(
+            encoding_id=self.encoding.id, ts_muxing=muxing
+        )
+
+    def _create_fmp4_muxing(
+        self,
+        output_path: str,
+        stream: bm.Stream,
+    ) -> bm.Fmp4Muxing:
+        muxing = bm.Fmp4Muxing(
+            outputs=[self._build_encoding_output(output_path=output_path)],
+            segment_length=self.config.SEGMENT_DURATION,
+            streams=[bm.MuxingStream(stream_id=stream.id)],
+        )
+
+        return self.encoding_api.encodings.muxings.fmp4.create(
+            encoding_id=self.encoding.id, fmp4_muxing=muxing
+        )
+
+    def _create_text_muxing(
+        self,
+        output_path: str,
+        stream: bm.Stream,
+        filename: str,
+    ) -> bm.TextMuxing:
+        muxing = bm.TextMuxing(
+            outputs=[self._build_encoding_output(output_path=output_path)],
+            streams=[bm.MuxingStream(stream_id=stream.id)],
+            filename=filename,
+            start_offset=10,
+        )
+
+        return self.encoding_api.encodings.muxings.text.create(
+            encoding_id=self.encoding.id, text_muxing=muxing
+        )
+
+    def _create_chunked_text_muxing(
+        self,
+        output_path: str,
+        stream: bm.Stream,
+        extension: str,
+    ) -> bm.ChunkedTextMuxing:
+        muxing = bm.ChunkedTextMuxing(
+            outputs=[self._build_encoding_output(output_path=output_path)],
+            segment_length=self.config.SEGMENT_DURATION,
+            streams=[bm.MuxingStream(stream_id=stream.id)],
+            segment_naming=f"segment_%number%.{extension}",
+            start_offset=10,
+        )
+
+        return self.encoding_api.encodings.muxings.chunked_text.create(
+            encoding_id=self.encoding.id, chunked_text_muxing=muxing
+        )
+
+    def _generate_hls_manifest(self, output_path: str) -> bm.HlsManifest:
         hls_manifest = bm.HlsManifest(
-            outputs=[self._build_encoding_output(output, output_path)],
+            outputs=[self._build_encoding_output(output_path)],
             name="HLS/ts Manifest",
             hls_master_playlist_version=bm.HlsVersion.HLS_V6,
             hls_media_playlist_version=bm.HlsVersion.HLS_V6,
@@ -388,16 +489,15 @@ class BitmovinController:
 
         return self.hls_api.create(hls_manifest=hls_manifest)
 
-    def _generate_dash_manifest(
-        self, output: bm.Output, output_path: str
-    ) -> Tuple[
-        bm.DashManifest, bm.Period, bm.VideoAdaptationSet, bm.AudioAdaptationSet
-    ]:
+    def _generate_dash_manifest_with_single_period(
+        self,
+        output_path: str,
+    ) -> Tuple[bm.DashManifest, bm.Period]:
         dash_manifest = self.dash_api.create(
             dash_manifest=bm.DashManifest(
                 name="Single-Period DASH Manifest",
                 manifest_name="stream.mpd",
-                outputs=[self._build_encoding_output(output, output_path)],
+                outputs=[self._build_encoding_output(output_path)],
                 profile=bm.DashProfile.LIVE,
             )
         )
@@ -406,23 +506,37 @@ class BitmovinController:
             manifest_id=dash_manifest.id, period=bm.Period()
         )
 
-        video_adaptation_set = self.dash_api.periods.adaptationsets.video.create(
+        return (dash_manifest, period)
+
+    def _add_video_adaptation_set(
+        self, dash_manifest: bm.DashManifest, period: bm.Period
+    ):
+        return self.dash_api.periods.adaptationsets.video.create(
             manifest_id=dash_manifest.id,
             period_id=period.id,
             video_adaptation_set=bm.VideoAdaptationSet(),
         )
 
-        audio_adaptation_set = self.dash_api.periods.adaptationsets.audio.create(
+    def _add_audio_adaptation_set(
+        self, dash_manifest: bm.DashManifest, period: bm.Period, lang: str
+    ):
+        return self.dash_api.periods.adaptationsets.audio.create(
             manifest_id=dash_manifest.id,
             period_id=period.id,
-            audio_adaptation_set=bm.AudioAdaptationSet(lang="en"),
+            audio_adaptation_set=bm.AudioAdaptationSet(lang=lang),
         )
 
-        return (dash_manifest, period, video_adaptation_set, audio_adaptation_set)
+    def _add_subtitle_adaptation_set(
+        self, dash_manifest: bm.DashManifest, period: bm.Period, lang: str
+    ):
+        return self.dash_api.periods.adaptationsets.subtitle.create(
+            manifest_id=dash_manifest.id,
+            period_id=period.id,
+            subtitle_adaptation_set=bm.SubtitleAdaptationSet(lang=lang),
+        )
 
-    def _add_dash_representation(
+    def _add_dash_fmp4_representation(
         self,
-        encoding: bm.Encoding,
         dash_manifest: bm.DashManifest,
         period: bm.Period,
         adaptation_set: bm.AdaptationSet,
@@ -431,7 +545,7 @@ class BitmovinController:
     ) -> bm.DashFmp4Representation:
         representation = bm.DashFmp4Representation(
             type_=bm.DashRepresentationType.TIMELINE,
-            encoding_id=encoding.id,
+            encoding_id=self.encoding.id,
             muxing_id=fmp4_muxing.id,
             segment_path=relative_path,
         )
@@ -443,9 +557,30 @@ class BitmovinController:
             dash_fmp4_representation=representation,
         )
 
+    def _add_dash_chunked_text_representation(
+        self,
+        dash_manifest: bm.DashManifest,
+        period: bm.Period,
+        adaptation_set: bm.SubtitleAdaptationSet,
+        text_muxing: bm.ChunkedTextMuxing,
+        relative_path: str,
+    ) -> bm.DashChunkedTextRepresentation:
+        representation = bm.DashChunkedTextRepresentation(
+            type_=bm.DashRepresentationType.TIMELINE,
+            encoding_id=self.encoding.id,
+            muxing_id=text_muxing.id,
+            segment_path=relative_path,
+        )
+
+        return self.dash_api.periods.adaptationsets.representations.chunked_text.create(
+            manifest_id=dash_manifest.id,
+            period_id=period.id,
+            adaptationset_id=adaptation_set.id,
+            dash_chunked_text_representation=representation,
+        )
+
     def _add_hls_variant(
         self,
-        encoding: bm.Encoding,
         hls_manifest: bm.HlsManifest,
         stream: bm.Stream,
         ts_muxing: bm.TsMuxing,
@@ -454,9 +589,10 @@ class BitmovinController:
     ) -> bm.StreamInfo:
         stream_info = bm.StreamInfo(
             audio="AUDIO",
+            subtitles="SUBS",
             segment_path=relative_path,
             uri=f"video_{filename_suffix}.m3u8",
-            encoding_id=encoding.id,
+            encoding_id=self.encoding.id,
             stream_id=stream.id,
             muxing_id=ts_muxing.id,
             force_frame_rate_attribute=True,
@@ -469,41 +605,64 @@ class BitmovinController:
 
     def _add_hls_media(
         self,
-        encoding: bm.Encoding,
         hls_manifest: bm.HlsManifest,
         stream: bm.Stream,
         ts_muxing: bm.TsMuxing,
         relative_path: str,
         filename_suffix: str,
+        label: str,
+        language: Optional[str] = None,
     ) -> bm.AudioMediaInfo:
         media_info = bm.AudioMediaInfo(
-            name=filename_suffix,
+            name=label,
             group_id="AUDIO",
-            language="en",
             segment_path=relative_path,
-            uri=f"audio_{filename_suffix}.m3u8",
-            encoding_id=encoding.id,
+            uri=f"audio_{language}_{filename_suffix}.m3u8",
+            encoding_id=self.encoding.id,
             stream_id=stream.id,
             muxing_id=ts_muxing.id,
+            language=language,
         )
 
         return self.hls_api.media.audio.create(
             manifest_id=hls_manifest.id, audio_media_info=media_info
         )
 
-    def _build_encoding_output(
-        self, output: bm.Output, output_path: str
-    ) -> bm.EncodingOutput:
+    def _add_hls_subtitle_media(
+        self,
+        hls_manifest: bm.HlsManifest,
+        stream: bm.Stream,
+        text_muxing: bm.ChunkedTextMuxing,
+        relative_path: str,
+        label: str,
+        language: Optional[str] = None,
+    ) -> bm.SubtitlesMediaInfo:
+        media_info = bm.SubtitlesMediaInfo(
+            name=label,
+            group_id="SUBS",
+            segment_path=relative_path,
+            uri=f"subtitles_{language}.m3u8",
+            encoding_id=self.encoding.id,
+            stream_id=stream.id,
+            muxing_id=text_muxing.id,
+            language=language,
+        )
+
+        return self.hls_api.media.subtitles.create(
+            manifest_id=hls_manifest.id, subtitles_media_info=media_info
+        )
+
+    def _build_encoding_output(self, output_path: str) -> bm.EncodingOutput:
         acl_entry = bm.AclEntry(permission=bm.AclPermission.PUBLIC_READ)
 
         return bm.EncodingOutput(
             output_path=self._build_absolute_path(relative_path=output_path),
-            output_id=output.id,
+            output_id=self.output.id,
             acl=[acl_entry],
         )
 
     def _build_absolute_path(self, relative_path: str) -> str:
-        return path.join(cfg.S3_OUTPUT_BASE_PATH, relative_path)
+        return path.join(self.config.S3_OUTPUT_BASE_PATH, relative_path)
 
     def _log_task_errors(self, task: bm.Task) -> None:
         if task is None:
@@ -513,3 +672,14 @@ class BitmovinController:
 
         for message in filtered:
             print(message.text)
+
+    def _make_language_label(self, lang: str, suffix: str = "") -> str:
+        if lang in self.config.LANGUAGE_LABELS:
+            label = self.config.LANGUAGE_LABELS[lang]
+        else:
+            label = lang
+
+        if suffix and suffix != "":
+            label += " " + suffix
+
+        return label
